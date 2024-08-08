@@ -1,0 +1,12 @@
+services:
+  - class: org.yamcs.http.HttpServer
+   
+dataDir: yamcs-data
+
+instances:
+  - mqtt-packets
+  - mqtt-frames
+
+# Secret key unique to a particular Yamcs installation.
+# This is used to provide cryptographic signing.
+secretKey: changeme

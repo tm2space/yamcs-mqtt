@@ -1,7 +1,7 @@
 TM Frame Link
 =============
 
-This link interprets the MQTT messages as CCSDS Frames.
+This link receives MQTT messages and processes them as CCSDS Frames.
 
 Usage
 -----

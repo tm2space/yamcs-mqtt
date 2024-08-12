@@ -22,7 +22,7 @@ Options
 
 .. include:: _includes/mqtt-common-options.rst
 
-topic (string(
+topic (string)
     **Required** The name of the topic to which the TC frames are sent.
     Default: not specified
 

@@ -6,7 +6,8 @@ from threading import Thread
 from time import sleep
 import paho.mqtt.client as mqtt
 import argparse
-
+import json
+import datetime
 
 AOS_FRAME_LENGTH = 1115 
 SPACECRAFT_ID = 29
@@ -90,7 +91,15 @@ def send_tm(simulator):
            
             aos_frame = build_aos_frame(packet, simulator.tm_frame_counter)
             if (aos_frame):
-                simulator.client.publish(simulator.tm_frame_topic, aos_frame)
+                #send the frame in json Leaf format
+                payload_str = " ".join(f"0x{byte:02x}" for byte in aos_frame)
+                data = {
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "payload": payload_str
+                }
+                json_data = json.dumps(data)
+                print(f"Sending data {json_data}");
+                simulator.client.publish(simulator.tm_frame_topic, json_data)
                 simulator.tm_frame_counter += 1
             
             

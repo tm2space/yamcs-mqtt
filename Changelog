@@ -1,0 +1,5 @@
+Version 0.2.0 released 14-Aug-2024
+- Allow specifying converters between packet/frame and MQTT messages. Added a converter for the LeafSpace ground station messages.
+
+Version 0.1.0 released 12-Aug-2024
+- First version support packet and frame Yamcs links

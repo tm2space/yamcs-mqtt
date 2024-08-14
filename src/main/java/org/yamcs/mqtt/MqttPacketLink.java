@@ -9,12 +9,12 @@ import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.yamcs.ConfigurationException;
 import org.yamcs.Spec;
-import org.yamcs.TmPacket;
 import org.yamcs.YConfiguration;
 import org.yamcs.Spec.OptionType;
 import org.yamcs.commanding.PreparedCommand;
 import org.yamcs.tctm.AbstractTcTmParamLink;
 import org.yamcs.utils.StringConverter;
+import org.yamcs.utils.YObjectLoader;
 
 /**
  * MQTT packet link - supports TM and TC packets
@@ -24,14 +24,23 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
     MqttAsyncClient client;
     String tmTopic, tcTopic;
     volatile Throwable subscriptionFailure;
+    MqttToTmPacketConverter tmConverter;
+    PreparedCommandToMqttConverter tcConverter;
 
     @Override
-    public void init(String yamcsInstance, String name, YConfiguration config) throws ConfigurationException {
-        super.init(yamcsInstance, name, config);
+    public void init(String yamcsInstance, String linkName, YConfiguration config) throws ConfigurationException {
+        super.init(yamcsInstance, linkName, config);
         connOpts = MqttUtils.getConnectionOptions(config);
         tmTopic = config.getString("tmTopic", null);
         tcTopic = config.getString("tcTopic", null);
         client = MqttUtils.newClient(config);
+
+        tmConverter = YObjectLoader.loadObject(config.getString("tmConverterClassName"));
+        tmConverter.init(yamcsInstance, linkName, config.getConfigOrEmpty("tmConverterArgs"));
+
+        tcConverter = YObjectLoader.loadObject(config.getString("tcConverterClassName"));
+        tcConverter.init(yamcsInstance, linkName, config.getConfigOrEmpty("tmConverterArgs"));
+
     }
 
     @Override
@@ -40,6 +49,13 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
         MqttUtils.addConnectionOptionsToSpec(spec);
         spec.addOption("tmTopic", OptionType.STRING).withRequired(false);
         spec.addOption("tcTopic", OptionType.STRING).withRequired(false);
+        spec.addOption("tmConverterClassName", OptionType.STRING)
+                .withDefault(DefaultMqttToTmPacketConverter.class.getName());
+        spec.addOption("tmConverterArgs", OptionType.MAP).withRequired(false);
+
+        spec.addOption("tcConverterClassName", OptionType.STRING)
+                .withDefault(DefaultPreparedCommandToMqttConverter.class.getName());
+        spec.addOption("tcConverterArgs", OptionType.MAP).withRequired(false);
 
         return spec;
     }
@@ -51,8 +67,10 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
         if (data == null) {
             return false;
         }
+        preparedCommand.setBinary(data);
+        var msg = tcConverter.convert(preparedCommand);
         try {
-            client.publish(tcTopic, data, 0, false, null, new IMqttActionListener() {
+            client.publish(tcTopic, msg, null, new IMqttActionListener() {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
                     ackCommand(preparedCommand.getCommandId());
@@ -81,13 +99,13 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
             log.trace("topic: {}, got message: {}", topic,
                     StringConverter.arrayToHexString(message.getPayload(), true));
         }
-        byte[] data = message.getPayload();
-        dataIn(1, data.length);
+        dataIn(1, message.getPayload().length);
 
-        var tmPacket = new TmPacket(timeService.getMissionTime(), data);
-        tmPacket = packetPreprocessor.process(tmPacket);
-        if (tmPacket != null) {
-            super.processPacket(tmPacket);
+        for(var tmPacket: tmConverter.convert(message)) {
+            tmPacket = packetPreprocessor.process(tmPacket);
+            if (tmPacket != null) {
+                super.processPacket(tmPacket);
+            }
         }
     }
 

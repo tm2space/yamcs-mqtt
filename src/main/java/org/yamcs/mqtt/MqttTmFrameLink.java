@@ -14,6 +14,7 @@ import org.yamcs.Spec.OptionType;
 import org.yamcs.YConfiguration;
 import org.yamcs.tctm.ccsds.AbstractTmFrameLink;
 import org.yamcs.utils.StringConverter;
+import org.yamcs.utils.YObjectLoader;
 
 /**
  * Receives telemetry fames via MQTT. One MQTT message = one TM frame.
@@ -23,12 +24,17 @@ public class MqttTmFrameLink extends AbstractTmFrameLink implements IMqttMessage
     MqttAsyncClient client;
     String topic;
     volatile Throwable subscriptionFailure;
+    MqttToFrameConverter converter;
 
     @Override
     public Spec getSpec() {
         var spec = getDefaultSpec();
         MqttUtils.addConnectionOptionsToSpec(spec);
         spec.addOption("topic", OptionType.STRING).withRequired(true);
+        spec.addOption("converterClassName", OptionType.STRING)
+                .withDefault(DefaultMqttToFrameConverter.class.getName());
+        spec.addOption("converterArgs", OptionType.MAP).withRequired(false);
+
         return spec;
     }
 
@@ -43,6 +49,8 @@ public class MqttTmFrameLink extends AbstractTmFrameLink implements IMqttMessage
         super.init(instance, name, config);
         connOpts = MqttUtils.getConnectionOptions(config);
         topic = config.getString("topic");
+        converter = YObjectLoader.loadObject(config.getString("converterClassName"));
+        converter.init(yamcsInstance, linkName, config.getConfigOrEmpty("converterArgs"));
 
         client = MqttUtils.newClient(config);
     }
@@ -75,12 +83,15 @@ public class MqttTmFrameLink extends AbstractTmFrameLink implements IMqttMessage
     @Override
     public void messageArrived(String topic, MqttMessage message) {
         try {
-            byte[] data = message.getPayload();
+
             if (log.isTraceEnabled()) {
-                log.trace("Received frame of length {}: {}", data.length, StringConverter.arrayToHexString(data, true));
+                log.trace("Received frame of length {}: {}", message.getPayload().length,
+                        StringConverter.arrayToHexString(message.getPayload(), true));
             }
-            dataIn(1, data.length);
-            handleFrame(timeService.getHresMissionTime(), data, 0, data.length);
+            for (var frame : converter.convert(message)) {
+                dataIn(1, frame.data().length);
+                handleFrame(frame.ert(), frame.data(), 0, frame.data().length);
+            }
 
         } catch (Exception e) {
             log.error("Error processing frame", e);

@@ -13,6 +13,7 @@ import org.yamcs.YConfiguration;
 import org.yamcs.tctm.ccsds.AbstractTcFrameLink;
 import org.yamcs.tctm.ccsds.TcTransferFrame;
 import org.yamcs.utils.StringConverter;
+import org.yamcs.utils.YObjectLoader;
 
 import com.google.common.util.concurrent.RateLimiter;
 
@@ -32,12 +33,18 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
     String topic;
     Thread thread;
 
+    FrameToMqttConverter converter;
+
     @Override
     public Spec getSpec() {
         var spec = getDefaultSpec();
         MqttUtils.addConnectionOptionsToSpec(spec);
         spec.addOption("frameMaxRate", OptionType.FLOAT);
         spec.addOption("topic", OptionType.STRING).withRequired(true);
+        spec.addOption("converterClassName", OptionType.STRING)
+                .withDefault(DefaultFrameToMqttConverter.class.getName());
+        spec.addOption("converterArgs", OptionType.MAP).withRequired(false);
+
         return spec;
     }
 
@@ -49,7 +56,8 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
         if (config.containsKey("frameMaxRate")) {
             rateLimiter = RateLimiter.create(config.getDouble("frameMaxRate"), 1, TimeUnit.SECONDS);
         }
-
+        converter = YObjectLoader.loadObject(config.getString("converterClassName"));
+        converter.init(yamcsInstance, linkName, config.getConfigOrEmpty("converterArgs"));
         client = MqttUtils.newClient(config);
     }
 
@@ -74,7 +82,8 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
                     }
                 }
                 try {
-                    client.publish(topic, data, 0, false, null, new IMqttActionListener() {
+                    var msg = converter.convert(data);
+                    client.publish(topic, null, msg, new IMqttActionListener() {
                         @Override
                         public void onSuccess(IMqttToken asyncActionToken) {
                             if (tf.isBypass()) {

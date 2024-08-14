@@ -10,7 +10,7 @@
 	<name>Yamcs MQTT</name>
 	<url>https://yamcs.org</url>
 	<description>
-		Data links for connecting Yamcs to MQTT providers.
+		Data links for connecting Yamcs to MQTT providers (such as LeafSpace ground stations).
 	</description>
 
 	<licenses>

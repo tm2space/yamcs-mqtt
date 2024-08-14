@@ -1,7 +1,7 @@
-About Yamcs: MQTT Links 
+MQTT Links Plugin
 =======================
 
-This plugin extends Yamcs with links to connect via MQTT to packet or frame providers.
+This plugin extends Yamcs with links to connect via MQTT to packet or frame ground stations such as `LeafSpace <https://leaf.space>`_ ground stations.
 
 .. rubric:: Usage with Maven
 

@@ -1,3 +1,6 @@
+Version 0.2.1 released 05-Sep-2024
+- Bug fix: when the mqtt links were disabled at startup, they would hang.
+
 Version 0.2.0 released 14-Aug-2024
 - Allow specifying converters between packet/frame and MQTT messages. Added a converter for the LeafSpace ground station messages.
 

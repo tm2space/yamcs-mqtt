@@ -57,7 +57,9 @@ public class MqttTmFrameLink extends AbstractTmFrameLink implements IMqttMessage
 
     @Override
     protected void doStart() {
-        if (!isDisabled()) {
+        if (isDisabled()) {
+            notifyStarted();
+        } else {
             try {
                 doConnect();
                 notifyStarted();

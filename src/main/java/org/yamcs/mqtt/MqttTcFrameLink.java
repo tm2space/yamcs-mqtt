@@ -128,12 +128,16 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
 
     @Override
     protected void doStart() {
-        try {
-            doEnable();
+        if (isDisabled()) {
             notifyStarted();
-        } catch (Exception e) {
-            log.warn("Exception starting link", e);
-            notifyFailed(e);
+        } else {
+            try {
+                doEnable();
+                notifyStarted();
+            } catch (Exception e) {
+                log.warn("Exception starting link", e);
+                notifyFailed(e);
+            }
         }
     }
 
@@ -141,7 +145,6 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
     protected void doStop() {
         MqttUtils.doStop(client, this::notifyStopped, this::notifyFailed);
     }
-
 
     @Override
     protected Status connectionStatus() {

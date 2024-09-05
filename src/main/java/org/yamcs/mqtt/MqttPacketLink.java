@@ -111,7 +111,9 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
 
     @Override
     protected void doStart() {
-        if (!isDisabled()) {
+        if (isDisabled()) {
+            notifyStarted();
+        } else {
             try {
                 doConnect();
                 notifyStarted();

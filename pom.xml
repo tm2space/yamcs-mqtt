@@ -5,7 +5,7 @@
 
 	<groupId>org.yamcs</groupId>
 	<artifactId>yamcs-mqtt</artifactId>
-	<version>0.2.2</version>
+	<version>0.2.3-SNAPSHOT</version>
 
 	<name>Yamcs MQTT</name>
 	<url>https://yamcs.org</url>

@@ -39,7 +39,7 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
         tmConverter.init(yamcsInstance, linkName, config.getConfigOrEmpty("tmConverterArgs"));
 
         tcConverter = YObjectLoader.loadObject(config.getString("tcConverterClassName"));
-        tcConverter.init(yamcsInstance, linkName, config.getConfigOrEmpty("tmConverterArgs"));
+        tcConverter.init(yamcsInstance, linkName, config.getConfigOrEmpty("tcConverterArgs"));
 
     }
 

@@ -1,3 +1,6 @@
+Version 0.2.2 released 27-Sep-2024
+- Bug fix: tmConverterArgs was used for the tcConverter instead of tcConverterArgs
+
 Version 0.2.1 released 05-Sep-2024
 - Bug fix: when the mqtt links were disabled at startup, they would hang.
 

@@ -14,7 +14,7 @@ Usage
         # MQTT connection parameters
         brokers:
            - tcp://test.mosquitto.org:1883 
-        topic: yamcs-tc-frames
+        topic: yamcs-tm-frames
         # other MQTT options
         # other frame link options
         

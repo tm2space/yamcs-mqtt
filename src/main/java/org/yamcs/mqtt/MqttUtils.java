@@ -2,6 +2,10 @@ package org.yamcs.mqtt;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Properties;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 import org.eclipse.paho.client.mqttv3.IMqttActionListener;
 import org.eclipse.paho.client.mqttv3.IMqttMessageListener;
@@ -10,6 +14,7 @@ import org.eclipse.paho.client.mqttv3.MqttAsyncClient;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
+import org.eclipse.paho.client.mqttv3.internal.NetworkModuleService;
 import org.yamcs.ConfigurationException;
 import org.yamcs.Spec;
 import org.yamcs.YConfiguration;
@@ -21,6 +26,15 @@ import org.yamcs.Spec.OptionType;
  * A set of utilities used by the MQTT packet and frame links to avoid code duplication
  */
 public class MqttUtils {
+    
+    static {
+        try {
+            // Register SSL network module for mqtts:// and ssl:// schemes
+            NetworkModuleService.validateURI("ssl://test:8883");
+        } catch (Exception e) {
+            // SSL network module not available, continue without it
+        }
+    }
 
     /**
      * create a new MQTT async client with the clientId and initial broker loaded from the config object
@@ -49,6 +63,28 @@ public class MqttUtils {
         connOpts.setConnectionTimeout(config.getInt("connectionTimeoutSecs"));
         connOpts.setKeepAliveInterval(config.getInt("keepAliveSecs"));
         connOpts.setCleanSession(true);
+
+        // Enable SSL support for mqtts:// or ssl:// URLs
+        for (String broker : brokers) {
+            if (broker.startsWith("ssl://") || broker.startsWith("mqtts://")) {
+                try {
+                    // Use default SSL context for TLS connections
+                    SSLContext sslContext = SSLContext.getDefault();
+                    connOpts.setSocketFactory(sslContext.getSocketFactory());
+                    break;
+                } catch (Exception e) {
+                    // Try with SSL properties as fallback
+                    try {
+                        Properties sslProps = new Properties();
+                        sslProps.setProperty("com.ibm.ssl.protocol", "TLS");
+                        connOpts.setSSLProperties(sslProps);
+                        break;
+                    } catch (Exception ex) {
+                        // Continue without SSL
+                    }
+                }
+            }
+        }
 
         return connOpts;
     }

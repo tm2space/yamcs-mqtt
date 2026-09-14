@@ -26,6 +26,11 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
     volatile Throwable subscriptionFailure;
     MqttToTmPacketConverter tmConverter;
     PreparedCommandToMqttConverter tcConverter;
+    // Captured at init so the link's "Detailed status" (web UI) shows what the MQTT link is
+    // configured with - broker, protocol version, topics, converter and the TM/TC processing
+    // chain - the same way the PlutoSDR S-band/UHF links surface their RF/framing config.
+    private String brokerUri, mqttVersion, tmConverterName, tcConverterName;
+    private String packetPreprocessorName, commandPostprocessorName, cryptoMode;
 
     @Override
     public void init(String yamcsInstance, String linkName, YConfiguration config) throws ConfigurationException {
@@ -41,6 +46,48 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
         tcConverter = YObjectLoader.loadObject(config.getString("tcConverterClassName"));
         tcConverter.init(yamcsInstance, linkName, config.getConfigOrEmpty("tcConverterArgs"));
 
+        java.util.List<String> brokers = config.getList("brokers");
+        brokerUri = brokers.isEmpty() ? "?" : brokers.get(0);
+        mqttVersion = config.getString("mqttVersion", "3.1.1");
+        tmConverterName = simpleName(config.getString("tmConverterClassName", null));
+        tcConverterName = simpleName(config.getString("tcConverterClassName", null));
+        packetPreprocessorName = simpleName(config.getString("packetPreprocessorClassName", null));
+        commandPostprocessorName = simpleName(config.getString("commandPostprocessorClassName", null));
+        // Crypto mode lives in the pre/postprocessor args (or their inner processor for framed links).
+        cryptoMode = firstNonNull(
+                nestedString(config, "commandPostprocessorArgs", "mode"),
+                nestedString(config, "commandPostprocessorArgs", "innerPostprocessorArgs", "mode"),
+                nestedString(config, "packetPreprocessorArgs", "mode"));
+    }
+
+    private static String simpleName(String className) {
+        if (className == null) {
+            return null;
+        }
+        int i = className.lastIndexOf('.');
+        return i >= 0 ? className.substring(i + 1) : className;
+    }
+
+    private static String firstNonNull(String... vals) {
+        for (String v : vals) {
+            if (v != null) {
+                return v;
+            }
+        }
+        return null;
+    }
+
+    /** Read a string at a nested config path, tolerating missing keys and env-substituted values. */
+    private static String nestedString(YConfiguration config, String... path) {
+        YConfiguration c = config;
+        for (int i = 0; i < path.length - 1; i++) {
+            if (c == null || !c.containsKey(path[i])) {
+                return null;
+            }
+            c = c.getConfigOrEmpty(path[i]);
+        }
+        String leaf = path[path.length - 1];
+        return (c != null && c.containsKey(leaf)) ? String.valueOf(c.get(leaf)) : null;
     }
 
     @Override
@@ -130,7 +177,50 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
 
     @Override
     public String getDetailedStatus() {
-        return "";
+        boolean connected = client != null && client.isConnected();
+        String conn = connected ? "CONNECTED" : "DISCONNECTED";
+        // getCurrentServerURI() throws NPE before the client has connected (no network modules yet),
+        // so only ask paho once connected; otherwise show the configured broker.
+        String server = brokerUri;
+        if (connected) {
+            try {
+                String cur = client.getCurrentServerURI();
+                if (cur != null) {
+                    server = cur;
+                }
+            } catch (RuntimeException e) {
+                // keep configured brokerUri
+            }
+        }
+        String clientId = "?";
+        if (client != null) {
+            try {
+                clientId = client.getClientId();
+            } catch (RuntimeException e) {
+                // ignore
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("MQTT: [").append(conn).append("] ").append(server)
+                .append(" (v").append(mqttVersion).append(", clientId ").append(clientId).append(")");
+        sb.append(" | TM topic: ").append(tmTopic != null ? tmTopic : "-");
+        sb.append(" | TC topic: ").append(tcTopic != null ? tcTopic : "-");
+        if (subscriptionFailure != null) {
+            sb.append(" | SUBSCRIBE FAILED: ").append(subscriptionFailure.getMessage());
+        }
+        if (tmConverterName != null) {
+            sb.append(" | TM converter: ").append(tmConverterName);
+        }
+        if (packetPreprocessorName != null) {
+            sb.append(" | TM preproc: ").append(packetPreprocessorName);
+        }
+        if (commandPostprocessorName != null) {
+            sb.append(" | TC postproc: ").append(commandPostprocessorName);
+        }
+        if (cryptoMode != null) {
+            sb.append(" | crypto: ").append(cryptoMode);
+        }
+        return sb.toString();
     }
 
     @Override

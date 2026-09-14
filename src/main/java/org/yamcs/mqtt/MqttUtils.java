@@ -62,11 +62,35 @@ public class MqttUtils {
         }
         connOpts.setConnectionTimeout(config.getInt("connectionTimeoutSecs"));
         connOpts.setKeepAliveInterval(config.getInt("keepAliveSecs"));
+        // Pin the protocol version. With Paho's MQTT_VERSION_DEFAULT (0) the client tries 3.1.1
+        // and, on ANY connect failure, ConnectActionListener rewrites the shared options to 3.1
+        // and reconnects - so one transient failure silently downgrades the link for good.
+        // Some brokers (Leaf Space loopback sandbox, 2026-09-14) accept 3.1 clients but never
+        // route their messages, which shows up as PUBACKs with no downlink traffic.
+        String mqttVersion = config.getString("mqttVersion");
+        switch (mqttVersion) {
+        case "3.1.1":
+            connOpts.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
+            break;
+        case "3.1":
+            connOpts.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1);
+            break;
+        case "default":
+            connOpts.setMqttVersion(MqttConnectOptions.MQTT_VERSION_DEFAULT);
+            break;
+        default:
+            throw new ConfigurationException("mqttVersion must be one of 3.1.1, 3.1, default; got " + mqttVersion);
+        }
         connOpts.setCleanSession(true);
 
-        // Enable SSL support for mqtts:// or ssl:// URLs
+        // Enable SSL support for mqtts://, ssl:// and wss:// URLs.
+        // wss:// must be handled here too: without an explicit SocketFactory, Paho's
+        // WebSocketSecureNetworkModuleFactory builds its own SSLSocketFactoryFactory, which
+        // reads the javax.net.ssl.trustStore system property (Yamcs points it at etc/trustStore)
+        // and fails with FileNotFoundException when that file does not exist. The JVM default
+        // SSLContext tolerates the missing file and falls back to the JRE cacerts.
         for (String broker : brokers) {
-            if (broker.startsWith("ssl://") || broker.startsWith("mqtts://")) {
+            if (broker.startsWith("ssl://") || broker.startsWith("mqtts://") || broker.startsWith("wss://")) {
                 try {
                     // Use default SSL context for TLS connections
                     SSLContext sslContext = SSLContext.getDefault();
@@ -98,6 +122,8 @@ public class MqttUtils {
         spec.addOption("connectionTimeoutSecs", OptionType.INTEGER).withDefault(5);
         spec.addOption("autoReconnect", OptionType.BOOLEAN).withDefault(true);
         spec.addOption("keepAliveSecs", OptionType.INTEGER).withDefault(60);
+        spec.addOption("mqttVersion", OptionType.STRING).withDefault("3.1.1")
+                .withDescription("MQTT protocol version: 3.1.1 (default), 3.1, or default (Paho auto-negotiate with 3.1 fallback)");
         spec.requireTogether("username", "password");
     }
 

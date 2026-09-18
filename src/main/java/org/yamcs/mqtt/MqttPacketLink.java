@@ -23,6 +23,10 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
     MqttConnectOptions connOpts;
     MqttAsyncClient client;
     String tmTopic, tcTopic;
+    // >0: publish the (post-processed) TC binary as separate MQTT messages of this many bytes each,
+    // i.e. frame-by-frame uplink (mirrors the PlutoSDR per-frame TX). 0 = one publish of the whole
+    // binary (default; unchanged behaviour for every other MQTT link).
+    int tcFrameSize;
     volatile Throwable subscriptionFailure;
     MqttToTmPacketConverter tmConverter;
     PreparedCommandToMqttConverter tcConverter;
@@ -38,6 +42,7 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
         connOpts = MqttUtils.getConnectionOptions(config);
         tmTopic = config.getString("tmTopic", null);
         tcTopic = config.getString("tcTopic", null);
+        tcFrameSize = config.getInt("tcFrameSize", 0);
         client = MqttUtils.newClient(config);
 
         tmConverter = YObjectLoader.loadObject(config.getString("tmConverterClassName"));
@@ -103,6 +108,7 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
         spec.addOption("tcConverterClassName", OptionType.STRING)
                 .withDefault(DefaultPreparedCommandToMqttConverter.class.getName());
         spec.addOption("tcConverterArgs", OptionType.MAP).withRequired(false);
+        spec.addOption("tcFrameSize", OptionType.INTEGER).withDefault(0);
 
         return spec;
     }
@@ -115,8 +121,36 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
             return false;
         }
         preparedCommand.setBinary(data);
-        var msg = tcConverter.convert(preparedCommand);
         try {
+            if (tcFrameSize > 0 && data.length > tcFrameSize) {
+                // Frame-by-frame uplink: publish each tcFrameSize-byte frame as its own MQTT message
+                // (paho preserves per-client publish order). Ack the command when the last frame is
+                // sent; a failure on any frame fails the command. Mirrors the PlutoSDR per-frame TX.
+                int total = (data.length + tcFrameSize - 1) / tcFrameSize;
+                for (int idx = 0; idx < total; idx++) {
+                    int off = idx * tcFrameSize;
+                    byte[] frame = java.util.Arrays.copyOfRange(data, off,
+                            Math.min(off + tcFrameSize, data.length));
+                    boolean last = idx == total - 1;
+                    client.publish(tcTopic, new MqttMessage(frame), null, new IMqttActionListener() {
+                        @Override
+                        public void onSuccess(IMqttToken asyncActionToken) {
+                            if (last) {
+                                ackCommand(preparedCommand.getCommandId());
+                            }
+                        }
+
+                        @Override
+                        public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
+                            log.warn("Failed to send TC frame {}", exception);
+                            failedCommand(preparedCommand.getCommandId(), exception.toString());
+                        }
+                    });
+                }
+                dataOut(1, data.length);
+                return true;
+            }
+            var msg = tcConverter.convert(preparedCommand);
             client.publish(tcTopic, msg, null, new IMqttActionListener() {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
@@ -205,6 +239,9 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
                 .append(" (v").append(mqttVersion).append(", clientId ").append(clientId).append(")");
         sb.append(" | TM topic: ").append(tmTopic != null ? tmTopic : "-");
         sb.append(" | TC topic: ").append(tcTopic != null ? tcTopic : "-");
+        if (tcFrameSize > 0) {
+            sb.append(" | TC frame-split: ").append(tcFrameSize).append("B");
+        }
         if (subscriptionFailure != null) {
             sb.append(" | SUBSCRIBE FAILED: ").append(subscriptionFailure.getMessage());
         }

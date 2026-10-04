@@ -13,6 +13,8 @@ import org.yamcs.YConfiguration;
 import org.yamcs.Spec.OptionType;
 import org.yamcs.commanding.PreparedCommand;
 import org.yamcs.tctm.AbstractTcTmParamLink;
+import org.yamcs.tctm.LinkAction;
+import org.yamcs.tctm.LinkActionProvider;
 import org.yamcs.utils.StringConverter;
 import org.yamcs.utils.YObjectLoader;
 
@@ -39,6 +41,13 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
     @Override
     public void init(String yamcsInstance, String linkName, YConfiguration config) throws ConfigurationException {
         super.init(yamcsInstance, linkName, config);
+        // A postprocessor has no link page of its own: surface its actions (e.g. the UHF framing
+        // postprocessor's "Configure TC framing") on this link.
+        if (cmdPostProcessor instanceof LinkActionProvider) {
+            for (LinkAction action : ((LinkActionProvider) cmdPostProcessor).getActions()) {
+                addAction(action);
+            }
+        }
         connOpts = MqttUtils.getConnectionOptions(config);
         tmTopic = config.getString("tmTopic", null);
         tcTopic = config.getString("tcTopic", null);

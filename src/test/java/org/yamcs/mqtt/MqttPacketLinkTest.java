@@ -2,6 +2,7 @@ package org.yamcs.mqtt;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -12,24 +13,32 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.yamcs.ValidationException;
 import org.yamcs.YConfiguration;
 import org.yamcs.commanding.PreparedCommand;
 import org.yamcs.events.EventProducer;
 import org.yamcs.events.EventProducerFactory;
 import org.yamcs.tctm.Link.Status;
+import org.yamcs.utils.TimeEncoding;
 
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBufUtil;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.group.ChannelGroup;
+import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -44,6 +53,7 @@ import io.netty.handler.codec.mqtt.MqttPublishMessage;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import io.netty.handler.codec.mqtt.MqttSubAckMessage;
 import io.netty.handler.codec.mqtt.MqttSubscribeMessage;
+import io.netty.util.concurrent.GlobalEventExecutor;
 
 public class MqttPacketLinkTest {
 
@@ -58,6 +68,8 @@ public class MqttPacketLinkTest {
     public static void setup() throws InterruptedException {
         bossGroup = new NioEventLoopGroup(1);
         workerGroup = new NioEventLoopGroup();
+        // the mockup event producer timestamps its events
+        TimeEncoding.setUp();
         EventProducerFactory.setMockup(true);
     }
 
@@ -160,10 +172,97 @@ public class MqttPacketLinkTest {
         mpt.stopAsync().awaitTerminated();
     }
 
+    /**
+     * A broker restart: the connection drops, the broker comes back having forgotten the (clean)
+     * session, and Paho reconnects on its own. The link has to subscribe again, or it sits there
+     * connected, reporting OK and receiving nothing.
+     */
+    @Test
+    public void testResubscribesAfterBrokerRestart() throws Exception {
+        broker.start();
+
+        var mpt = getLink(true, "tm");
+        mpt.setTmSink(tmPacket -> {
+        });
+        mpt.startAsync().awaitRunning();
+
+        waitFor("the first subscription", () -> broker.subscriptions.get() == 1, 5000);
+        broker.publish("tm", new byte[32]);
+        waitFor("a message before the restart", () -> mpt.getDataInCount() == 1, 5000);
+
+        broker.shutdownNetwork();
+        waitFor("the link to notice the broker is gone", () -> mpt.getLinkStatus() == Status.UNAVAIL, 5000);
+        // Stay down past Paho's first reconnect attempt, as a real restart does.
+        Thread.sleep(1500);
+        broker.start();
+
+        waitFor("a second subscription after the reconnect", () -> broker.subscriptions.get() == 2, 20000);
+        waitFor("the link to be OK again", () -> mpt.getLinkStatus() == Status.OK, 5000);
+        broker.publish("tm", new byte[32]);
+        waitFor("a message after the restart", () -> mpt.getDataInCount() == 2, 5000);
+
+        mpt.stopAsync().awaitTerminated();
+    }
+
+    /** The same when only the connection drops and the broker itself stays up. */
+    @Test
+    public void testResubscribesAfterConnectionDrop() throws Exception {
+        broker.start();
+
+        var mpt = getLink(true, "tm");
+        mpt.setTmSink(tmPacket -> {
+        });
+        mpt.startAsync().awaitRunning();
+        waitFor("the first subscription", () -> broker.subscriptions.get() == 1, 5000);
+
+        broker.dropClients();
+
+        waitFor("a second subscription after the reconnect", () -> broker.subscriptions.get() == 2, 20000);
+        broker.publish("tm", new byte[32]);
+        waitFor("a message after the reconnect", () -> mpt.getDataInCount() == 1, 5000);
+        assertEquals(Status.OK, mpt.getLinkStatus());
+
+        mpt.stopAsync().awaitTerminated();
+    }
+
+    /** Disabling and enabling the link by hand still leaves exactly one subscription per connect. */
+    @Test
+    public void testSubscribesOncePerConnect() throws Exception {
+        broker.start();
+
+        var mpt = getLink(true, "tm");
+        mpt.startAsync().awaitRunning();
+        waitFor("the first subscription", () -> broker.subscriptions.get() == 1, 5000);
+
+        mpt.disable();
+        waitFor("the link to disconnect", () -> broker.clients.isEmpty(), 5000);
+        mpt.enable();
+        waitFor("a subscription after enabling", () -> broker.subscriptions.get() == 2, 5000);
+
+        Thread.sleep(1000);
+        assertEquals(2, broker.subscriptions.get());
+
+        mpt.stopAsync().awaitTerminated();
+    }
+
+    static void waitFor(String what, BooleanSupplier condition, long timeoutMillis) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+        assertTrue(condition.getAsBoolean(), "timed out waiting for " + what);
+    }
+
     MqttPacketLink getLink(boolean autoReconnect, String tmTopic) {
         YConfiguration config = getConfig(broker.port, autoReconnect, tmTopic);
 
         MqttPacketLink mpt = new MqttPacketLink();
+        try {
+            // through the link's spec, as Yamcs does, so that options left out get their defaults
+            config = mpt.getSpec().validate(config);
+        } catch (ValidationException e) {
+            throw new IllegalArgumentException(e);
+        }
         mpt.init("test", "test", config);
         return mpt;
 
@@ -171,6 +270,8 @@ public class MqttPacketLinkTest {
 
     YConfiguration getConfig(int port, boolean autoReconnect, String tmTopic) {
         Map<String, Object> m = new HashMap<>();
+        m.put("name", "test");
+        m.put("class", MqttPacketLink.class.getName());
         m.put("brokers", Arrays.asList("tcp://localhost:" + port));
         m.put("clientId", "test-clientid");
         m.put("connectionTimeoutSecs", 1);
@@ -185,6 +286,8 @@ public class MqttPacketLinkTest {
 
     static class FakeMqttBroker {
         List<byte[]> received = new ArrayList<>();
+        final AtomicInteger subscriptions = new AtomicInteger();
+        final ChannelGroup clients = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
 
         private final NioEventLoopGroup bossGroup = new NioEventLoopGroup(1);
         private final NioEventLoopGroup workerGroup = new NioEventLoopGroup();
@@ -202,10 +305,12 @@ public class MqttPacketLinkTest {
             ServerBootstrap b = new ServerBootstrap();
             b.group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
+                    .option(ChannelOption.SO_REUSEADDR, true)
                     // .handler(new LoggingHandler(LogLevel.INFO))
                     .childHandler(new ChannelInitializer<SocketChannel>() {
                         @Override
                         public void initChannel(SocketChannel ch) {
+                            clients.add(ch);
                             ch.pipeline().addLast(MqttEncoder.INSTANCE);
                             ch.pipeline().addLast(new MqttDecoder());
                             ch.pipeline().addLast(new SimpleChannelInboundHandler<MqttMessage>() {
@@ -221,6 +326,7 @@ public class MqttPacketLinkTest {
                                             ctx.writeAndFlush(connAckMessage);
                                         }, connAckDelayMillis, TimeUnit.MILLISECONDS);
                                     } else if (msg instanceof MqttSubscribeMessage) {
+                                        subscriptions.incrementAndGet();
                                         ctx.executor().schedule(() -> {
                                             MqttSubAckMessage subAckMessage = MqttMessageBuilders.subAck()
                                                     .packetId(((MqttSubscribeMessage) msg).variableHeader().messageId())
@@ -245,14 +351,40 @@ public class MqttPacketLinkTest {
                         }
                     });
 
-            serverChannel = b.bind(0).sync().channel();
+            // port is 0 the first time (any free port) and stays the same across a restart
+            serverChannel = b.bind(port).sync().channel();
             port = ((InetSocketAddress) serverChannel.localAddress()).getPort();
+        }
+
+        /** Sends a message to every connected client, as a broker would to its subscribers. */
+        public void publish(String topic, byte[] payload) {
+            clients.writeAndFlush(MqttMessageBuilders.publish()
+                    .topicName(topic)
+                    .qos(MqttQoS.AT_MOST_ONCE)
+                    .retained(false)
+                    .payload(Unpooled.wrappedBuffer(payload))
+                    .build());
+        }
+
+        /** Cuts every client connection; the broker keeps listening. */
+        public void dropClients() throws InterruptedException {
+            clients.close().sync();
+        }
+
+        /** Stops listening and cuts every connection; start() brings it back on the same port. */
+        public void shutdownNetwork() throws InterruptedException {
+            if (serverChannel != null) {
+                serverChannel.close().sync();
+                serverChannel = null;
+            }
+            dropClients();
         }
 
         public void stop() {
             if (serverChannel != null) {
                 serverChannel.close();
             }
+            clients.close();
             bossGroup.shutdownGracefully();
             workerGroup.shutdownGracefully();
         }

@@ -30,6 +30,7 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
     // binary (default; unchanged behaviour for every other MQTT link).
     int tcFrameSize;
     volatile Throwable subscriptionFailure;
+    MqttUtils.ConnectRetry retry;
     MqttToTmPacketConverter tmConverter;
     PreparedCommandToMqttConverter tcConverter;
     // Captured at init so the link's "Detailed status" (web UI) shows what the MQTT link is
@@ -49,6 +50,7 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
             }
         }
         connOpts = MqttUtils.getConnectionOptions(config);
+        retry = new MqttUtils.ConnectRetry(linkName, log);
         tmTopic = config.getString("tmTopic", null);
         tcTopic = config.getString("tcTopic", null);
         tcFrameSize = config.getInt("tcFrameSize", 0);
@@ -215,6 +217,7 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
 
     @Override
     protected void doStop() {
+        retry.shutdown();
         MqttUtils.doStop(client, this::notifyStopped, this::notifyFailed);
     }
 
@@ -271,21 +274,47 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
 
     @Override
     protected void doDisable() throws Exception {
+        retry.cancel();
         MqttUtils.doDisable(client);
     }
 
     @Override
     protected void doEnable() throws Exception {
+        retry.reset();
         doConnect();
     }
 
     private void doConnect() throws MqttException {
         subscriptionFailure = null;
+        MqttUtils.ConnectListener onResult = new MqttUtils.ConnectListener() {
+            @Override
+            public void connected() {
+                retry.connected();
+            }
+
+            @Override
+            public void failed(Throwable cause) {
+                retry.afterFailure(MqttPacketLink.this::reconnect);
+            }
+        };
         if (tmTopic != null) {
             MqttUtils.connectAndSubscribe(connOpts, client, this, tmTopic, log, eventProducer,
-                    e -> subscriptionFailure = e);
+                    e -> subscriptionFailure = e, onResult);
         } else {
-            MqttUtils.connect(connOpts, client, log, eventProducer);
+            MqttUtils.connect(connOpts, client, log, eventProducer, onResult);
+        }
+    }
+
+    /** A retried first connection; runs on the retry timer. */
+    private void reconnect() {
+        if (isDisabled() || !isRunning() || client.isConnected()) {
+            return;
+        }
+        try {
+            doConnect();
+        } catch (MqttException e) {
+            log.warn("MQTT connection attempt could not be started: {}", MqttUtils.describe(e));
+            retry.afterFailure(this::reconnect);
         }
     }
 

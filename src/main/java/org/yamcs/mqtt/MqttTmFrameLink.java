@@ -24,6 +24,7 @@ public class MqttTmFrameLink extends AbstractTmFrameLink implements IMqttMessage
     MqttAsyncClient client;
     String topic;
     volatile Throwable subscriptionFailure;
+    MqttUtils.ConnectRetry retry;
     MqttToFrameConverter converter;
 
     @Override
@@ -48,6 +49,7 @@ public class MqttTmFrameLink extends AbstractTmFrameLink implements IMqttMessage
     public void init(String instance, String name, YConfiguration config) throws ConfigurationException {
         super.init(instance, name, config);
         connOpts = MqttUtils.getConnectionOptions(config);
+        retry = new MqttUtils.ConnectRetry(name, log);
         topic = config.getString("topic");
         converter = YObjectLoader.loadObject(config.getString("converterClassName"));
         converter.init(yamcsInstance, linkName, config.getConfigOrEmpty("converterArgs"));
@@ -71,11 +73,36 @@ public class MqttTmFrameLink extends AbstractTmFrameLink implements IMqttMessage
 
     private void doConnect() throws MqttException {
         subscriptionFailure = null;
-        MqttUtils.connectAndSubscribe(connOpts, client, this, topic, log, eventProducer, e -> subscriptionFailure = e);
+        MqttUtils.connectAndSubscribe(connOpts, client, this, topic, log, eventProducer, e -> subscriptionFailure = e,
+                new MqttUtils.ConnectListener() {
+                    @Override
+                    public void connected() {
+                        retry.connected();
+                    }
+
+                    @Override
+                    public void failed(Throwable cause) {
+                        retry.afterFailure(MqttTmFrameLink.this::reconnect);
+                    }
+                });
+    }
+
+    /** A retried first connection; runs on the retry timer. */
+    private void reconnect() {
+        if (isDisabled() || !isRunning() || client.isConnected()) {
+            return;
+        }
+        try {
+            doConnect();
+        } catch (MqttException e) {
+            log.warn("MQTT connection attempt could not be started: {}", MqttUtils.describe(e));
+            retry.afterFailure(this::reconnect);
+        }
     }
 
     @Override
     protected void doStop() {
+        retry.shutdown();
         MqttUtils.doStop(client, this::notifyStopped, this::notifyFailed);
     }
 
@@ -110,11 +137,13 @@ public class MqttTmFrameLink extends AbstractTmFrameLink implements IMqttMessage
 
     @Override
     protected void doDisable() throws Exception {
+        retry.cancel();
         MqttUtils.doDisable(client);
     }
 
     @Override
     protected void doEnable() throws Exception {
+        retry.reset();
         doConnect();
     }
 

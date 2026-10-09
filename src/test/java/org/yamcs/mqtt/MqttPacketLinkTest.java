@@ -225,6 +225,51 @@ public class MqttPacketLinkTest {
         mpt.stopAsync().awaitTerminated();
     }
 
+    /**
+     * The broker refuses the first connection (down, or rejecting a burst of connects, as Kepler's
+     * does). Paho never retries a failed first connect; the link must, or it stays down until an
+     * operator cycles it.
+     */
+    @Test
+    public void retriesAFailedFirstConnection() throws Exception {
+        // Pick the port first so the link can be pointed at a broker that is not listening yet.
+        try (java.net.ServerSocket s = new java.net.ServerSocket(0)) {
+            broker.port = s.getLocalPort();
+        }
+        var mpt = getLink(true, "tm");
+        mpt.setTmSink(tmPacket -> {
+        });
+        mpt.startAsync().awaitRunning();
+        Thread.sleep(1500);
+        assertEquals(Status.UNAVAIL, mpt.getLinkStatus(), "nothing listening yet");
+
+        broker.start();
+        // retries at 1 s, 2 s, 4 s ... after the failures: well inside this wait
+        waitFor("the link to connect on a retry", () -> broker.subscriptions.get() == 1, 15000);
+        waitFor("the link to be OK", () -> mpt.getLinkStatus() == Status.OK, 5000);
+
+        mpt.stopAsync().awaitTerminated();
+    }
+
+    /** Disabling the link stops the retries. */
+    @Test
+    public void disablingStopsTheRetries() throws Exception {
+        try (java.net.ServerSocket s = new java.net.ServerSocket(0)) {
+            broker.port = s.getLocalPort();
+        }
+        var mpt = getLink(true, "tm");
+        mpt.startAsync().awaitRunning();
+        Thread.sleep(1500);
+        mpt.disable();
+        broker.start();
+        Thread.sleep(6000);
+        assertEquals(0, broker.subscriptions.get(), "a disabled link must not connect");
+
+        mpt.enable();
+        waitFor("the link to connect once enabled", () -> broker.subscriptions.get() == 1, 10000);
+        mpt.stopAsync().awaitTerminated();
+    }
+
     /** Disabling and enabling the link by hand still leaves exactly one subscription per connect. */
     @Test
     public void testSubscribesOncePerConnect() throws Exception {

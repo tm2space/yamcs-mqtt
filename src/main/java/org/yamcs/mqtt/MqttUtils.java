@@ -3,6 +3,10 @@ package org.yamcs.mqtt;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
@@ -130,10 +134,101 @@ public class MqttUtils {
         spec.requireTogether("username", "password");
     }
 
+    /** Told how a connection attempt ended. */
+    interface ConnectListener {
+        void connected();
+
+        void failed(Throwable cause);
+    }
+
+    /**
+     * Retries a connection that failed. Paho reconnects on its own only after a connection has
+     * succeeded once; a link whose very first attempt is refused would otherwise stay down until
+     * an operator disabled and enabled it. The delay doubles from one second to a minute between
+     * attempts and resets once connected.
+     */
+    static final class ConnectRetry {
+        private static final long MAX_DELAY_MS = 60_000;
+        private final ScheduledExecutorService timer;
+        private final Log log;
+        private int attempt;
+        private ScheduledFuture<?> pending;
+        private boolean enabled = true;
+
+        ConnectRetry(String name, Log log) {
+            this.log = log;
+            this.timer = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "mqtt-connect-retry-" + name);
+                t.setDaemon(true);
+                return t;
+            });
+        }
+
+        /** Schedules another attempt, unless retries were switched off (link disabled or stopped). */
+        synchronized void afterFailure(Runnable connect) {
+            if (!enabled) {
+                return;
+            }
+            long delay = Math.min(MAX_DELAY_MS, 1000L << Math.min(attempt, 6));
+            attempt++;
+            log.warn("Retrying the MQTT connection in {} s (attempt {})", delay / 1000, attempt + 1);
+            pending = timer.schedule(connect, delay, TimeUnit.MILLISECONDS);
+        }
+
+        synchronized void connected() {
+            attempt = 0;
+        }
+
+        /** Enabling the link: retries allowed, counting from the start. */
+        synchronized void reset() {
+            cancel();
+            enabled = true;
+            attempt = 0;
+        }
+
+        /** Disabling or stopping the link: no further attempts. */
+        synchronized void cancel() {
+            enabled = false;
+            if (pending != null) {
+                pending.cancel(false);
+                pending = null;
+            }
+        }
+
+        synchronized void shutdown() {
+            cancel();
+            timer.shutdownNow();
+        }
+    }
+
+    /** The exception and its causes, for a log line: Paho's own message is often just "MqttException". */
+    static String describe(Throwable e) {
+        StringBuilder sb = new StringBuilder();
+        for (Throwable t = e; t != null && sb.length() < 400; t = t.getCause()) {
+            if (sb.length() > 0) {
+                sb.append(" <- ");
+            }
+            sb.append(t.getClass().getSimpleName());
+            if (t.getMessage() != null && !t.getMessage().equals(t.getClass().getName())) {
+                sb.append(": ").append(t.getMessage());
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return sb.toString();
+    }
+
     /**
      * Connect to MQTT
      */
     static void connect(MqttConnectOptions connOpts, MqttAsyncClient client, Log log, EventProducer eventProducer)
+            throws MqttException {
+        connect(connOpts, client, log, eventProducer, null);
+    }
+
+    static void connect(MqttConnectOptions connOpts, MqttAsyncClient client, Log log, EventProducer eventProducer,
+            ConnectListener listener)
             throws MqttException {
         log.info("Connecting to MQTT with clientId {} and options: {}", client.getClientId(), connOpts);
 
@@ -141,14 +236,19 @@ public class MqttUtils {
             @Override
             public void onSuccess(IMqttToken token) {
                 log.info("Succesfully connected to MQTT");
-
+                if (listener != null) {
+                    listener.connected();
+                }
             }
 
             @Override
             public void onFailure(IMqttToken t, Throwable e) {
-                String msg = "Failed to connect to MQTT with clientId " + client.getClientId() + ": " + e.getMessage();
+                String msg = "Failed to connect to MQTT with clientId " + client.getClientId() + ": " + describe(e);
                 eventProducer.sendWarning(msg);
                 log.warn("{}", msg);
+                if (listener != null) {
+                    listener.failed(e);
+                }
             }
         });
     }
@@ -165,6 +265,14 @@ public class MqttUtils {
     static void connectAndSubscribe(MqttConnectOptions connOpts, MqttAsyncClient client,
             IMqttMessageListener messageListener, String topic, Log log, EventProducer eventProducer,
             SubscriptionFailureCallback subscriptionFailureCallback)
+            throws MqttException {
+        connectAndSubscribe(connOpts, client, messageListener, topic, log, eventProducer, subscriptionFailureCallback,
+                null);
+    }
+
+    static void connectAndSubscribe(MqttConnectOptions connOpts, MqttAsyncClient client,
+            IMqttMessageListener messageListener, String topic, Log log, EventProducer eventProducer,
+            SubscriptionFailureCallback subscriptionFailureCallback, ConnectListener listener)
             throws MqttException {
         log.info("Connecting to MQTT with clientId {} and options: {}", client.getClientId(), connOpts);
 
@@ -212,13 +320,19 @@ public class MqttUtils {
             public void onSuccess(IMqttToken token) {
                 // the subscription follows in connectComplete, which Paho calls right after this
                 log.info("Succesfully connected to MQTT");
+                if (listener != null) {
+                    listener.connected();
+                }
             }
 
             @Override
             public void onFailure(IMqttToken t, Throwable e) {
-                String msg = "Failed to connect to MQTT with clientId " + client.getClientId() + ": " + e.getMessage();
+                String msg = "Failed to connect to MQTT with clientId " + client.getClientId() + ": " + describe(e);
                 eventProducer.sendWarning(msg);
                 log.warn("{}", msg);
+                if (listener != null) {
+                    listener.failed(e);
+                }
             }
         });
     }

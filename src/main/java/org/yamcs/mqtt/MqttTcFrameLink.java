@@ -32,6 +32,7 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
     MqttAsyncClient client;
     String topic;
     Thread thread;
+    MqttUtils.ConnectRetry retry;
 
     FrameToMqttConverter converter;
 
@@ -52,6 +53,7 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
     public void init(String yamcsInstance, String name, YConfiguration config) {
         super.init(yamcsInstance, name, config);
         connOpts = MqttUtils.getConnectionOptions(config);
+        retry = new MqttUtils.ConnectRetry(name, log);
         topic = config.getString("topic");
         if (config.containsKey("frameMaxRate")) {
             rateLimiter = RateLimiter.create(config.getDouble("frameMaxRate"), 1, TimeUnit.SECONDS);
@@ -112,15 +114,44 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
 
     @Override
     protected void doDisable() throws Exception {
+        retry.cancel();
         if (thread != null) {
             thread.interrupt();
         }
         MqttUtils.doDisable(client);
     }
 
+    private void doConnect() throws MqttException {
+        MqttUtils.connect(connOpts, client, log, eventProducer, new MqttUtils.ConnectListener() {
+            @Override
+            public void connected() {
+                retry.connected();
+            }
+
+            @Override
+            public void failed(Throwable cause) {
+                retry.afterFailure(MqttTcFrameLink.this::reconnect);
+            }
+        });
+    }
+
+    /** A retried first connection; runs on the retry timer. */
+    private void reconnect() {
+        if (isDisabled() || !isRunning() || client.isConnected()) {
+            return;
+        }
+        try {
+            doConnect();
+        } catch (MqttException e) {
+            log.warn("MQTT connection attempt could not be started: {}", MqttUtils.describe(e));
+            retry.afterFailure(this::reconnect);
+        }
+    }
+
     @Override
     protected void doEnable() throws Exception {
-        MqttUtils.connect(connOpts, client, log, eventProducer);
+        retry.reset();
+        doConnect();
         thread = new Thread(this);
         thread.setName(getClass().getSimpleName() + "-" + linkName);
         thread.start();
@@ -143,6 +174,7 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
 
     @Override
     protected void doStop() {
+        retry.shutdown();
         MqttUtils.doStop(client, this::notifyStopped, this::notifyFailed);
     }
 

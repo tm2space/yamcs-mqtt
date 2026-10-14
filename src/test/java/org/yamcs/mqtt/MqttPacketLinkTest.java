@@ -3,12 +3,20 @@ package org.yamcs.mqtt;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +31,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.yamcs.ValidationException;
 import org.yamcs.YConfiguration;
+import org.yamcs.cmdhistory.CommandHistoryPublisher;
+import org.yamcs.cmdhistory.CommandHistoryPublisher.AckStatus;
 import org.yamcs.commanding.PreparedCommand;
 import org.yamcs.events.EventProducer;
 import org.yamcs.events.EventProducerFactory;
@@ -173,6 +183,66 @@ public class MqttPacketLinkTest {
     }
 
     /**
+     * Frame-by-frame uplink of a TC larger than the MQTT in-flight window (maxInflight
+     * unacknowledged publishes): the frames past the window wait for PUBACKs and go out in order,
+     * and the command is acked once the last one is sent. The default window holds them all.
+     */
+    @Test
+    public void testFrameSplitPastInflightWindow() throws Exception {
+        // a slow broker keeps every frame in flight while the link is still publishing
+        broker.pubAckDelayMillis = 500;
+        broker.start();
+        byte[] commandData = new byte[27 * 64];
+        for (int i = 0; i < commandData.length; i++) {
+            commandData[i] = (byte) (i / 64);
+        }
+        var pc = mock(PreparedCommand.class);
+        when(pc.getBinary()).thenReturn(commandData);
+
+        for (Map<String, Object> options : List.of(Map.<String, Object> of("tcFrameSize", 64, "maxInflight", 10),
+                Map.<String, Object> of("tcFrameSize", 64))) {
+            broker.received.clear();
+            var mpt = getLink(true, null, options);
+            var cmdHist = mock(CommandHistoryPublisher.class);
+            mpt.setCommandHistoryPublisher(cmdHist);
+            mpt.startAsync().awaitRunning();
+            waitFor("the link to connect", () -> mpt.getLinkStatus() == Status.OK, 5000);
+
+            assertTrue(mpt.sendCommand(pc));
+            waitFor("all 27 frames with " + options, () -> broker.received.size() == 27, 5000);
+            for (int idx = 0; idx < 27; idx++) {
+                assertArrayEquals(Arrays.copyOfRange(commandData, idx * 64, (idx + 1) * 64),
+                        broker.received.get(idx), "frame " + idx + " with " + options);
+            }
+            verify(cmdHist, timeout(5000)).publishAck(any(), eq(CommandHistoryPublisher.AcknowledgeSent_KEY),
+                    anyLong(), eq(AckStatus.OK));
+            verify(cmdHist, never()).commandFailed(any(), anyLong(), anyString());
+            mpt.stopAsync().awaitTerminated();
+        }
+
+        // The connection drops with a full window in flight: the command fails and the frames still
+        // queued never go out, not even after the reconnect.
+        broker.received.clear();
+        broker.pubAckDelayMillis = 60_000;
+        var mpt = getLink(true, null, Map.of("tcFrameSize", 64, "maxInflight", 10));
+        var cmdHist = mock(CommandHistoryPublisher.class);
+        mpt.setCommandHistoryPublisher(cmdHist);
+        mpt.startAsync().awaitRunning();
+        waitFor("the link to connect", () -> mpt.getLinkStatus() == Status.OK, 5000);
+
+        assertTrue(mpt.sendCommand(pc));
+        waitFor("a full window", () -> broker.received.size() == 10, 5000);
+        broker.dropClients();
+        verify(cmdHist, timeout(5000)).commandFailed(any(), anyLong(), anyString());
+        waitFor("the link to reconnect", () -> broker.clients.size() == 1, 10000);
+        Thread.sleep(1000);
+        assertEquals(10, broker.received.size(), "no frame after the failed one");
+        verify(cmdHist, never()).publishAck(any(), eq(CommandHistoryPublisher.AcknowledgeSent_KEY),
+                anyLong(), eq(AckStatus.OK));
+        mpt.stopAsync().awaitTerminated();
+    }
+
+    /**
      * A broker restart: the connection drops, the broker comes back having forgotten the (clean)
      * session, and Paho reconnects on its own. The link has to subscribe again, or it sits there
      * connected, reporting OK and receiving nothing.
@@ -299,7 +369,13 @@ public class MqttPacketLinkTest {
     }
 
     MqttPacketLink getLink(boolean autoReconnect, String tmTopic) {
-        YConfiguration config = getConfig(broker.port, autoReconnect, tmTopic);
+        return getLink(autoReconnect, tmTopic, Map.of());
+    }
+
+    MqttPacketLink getLink(boolean autoReconnect, String tmTopic, Map<String, Object> extraOptions) {
+        Map<String, Object> m = new HashMap<>(getConfig(broker.port, autoReconnect, tmTopic).getRoot());
+        m.putAll(extraOptions);
+        YConfiguration config = YConfiguration.wrap(m);
 
         MqttPacketLink mpt = new MqttPacketLink();
         try {
@@ -330,7 +406,7 @@ public class MqttPacketLinkTest {
     }
 
     static class FakeMqttBroker {
-        List<byte[]> received = new ArrayList<>();
+        List<byte[]> received = Collections.synchronizedList(new ArrayList<>());
         final AtomicInteger subscriptions = new AtomicInteger();
         final ChannelGroup clients = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
 

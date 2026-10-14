@@ -69,6 +69,10 @@ public class MqttUtils {
         }
         connOpts.setConnectionTimeout(config.getInt("connectionTimeoutSecs"));
         connOpts.setKeepAliveInterval(config.getInt("keepAliveSecs"));
+        // Paho refuses a QoS 1/2 publish once this many are unacknowledged ("Too many publishes in
+        // progress", 32202). A frame-split TC (tcFrameSize) publishes one message per frame, so a
+        // large command needs a window at least as big as its frame count.
+        connOpts.setMaxInflight(config.getInt("maxInflight"));
         // Pin the protocol version. With Paho's MQTT_VERSION_DEFAULT (0) the client tries 3.1.1
         // and, on ANY connect failure, ConnectActionListener rewrites the shared options to 3.1
         // and reconnects - so one transient failure silently downgrades the link for good.
@@ -129,6 +133,8 @@ public class MqttUtils {
         spec.addOption("connectionTimeoutSecs", OptionType.INTEGER).withDefault(5);
         spec.addOption("autoReconnect", OptionType.BOOLEAN).withDefault(true);
         spec.addOption("keepAliveSecs", OptionType.INTEGER).withDefault(60);
+        spec.addOption("maxInflight", OptionType.INTEGER).withDefault(256)
+                .withDescription("Maximum number of unacknowledged QoS 1/2 publishes (Paho's own default is 10)");
         spec.addOption("mqttVersion", OptionType.STRING).withDefault("3.1.1")
                 .withDescription("MQTT protocol version: 3.1.1 (default), 3.1, or default (Paho auto-negotiate with 3.1 fallback)");
         spec.requireTogether("username", "password");

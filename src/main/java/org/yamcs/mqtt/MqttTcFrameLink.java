@@ -83,6 +83,13 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
                         log.trace("Outgoing CLTU: {}", StringConverter.arrayToHexString(data, true));
                     }
                 }
+                if (client == null) {
+                    log.warn("Command frame not sent: {}", MqttUtils.NO_BROKER);
+                    if (tf.isBypass()) {
+                        failBypassFrame(tf, MqttUtils.NO_BROKER);
+                    }
+                    continue;
+                }
                 try {
                     var msg = converter.convert(data);
                     client.publish(topic, null, msg, new IMqttActionListener() {
@@ -180,10 +187,21 @@ public class MqttTcFrameLink extends AbstractTcFrameLink implements Runnable {
 
     @Override
     protected Status connectionStatus() {
+        if (client == null) {
+            return Status.FAILED;
+        }
         if (client.isConnected()) {
             return Status.OK;
         } else {
             return Status.UNAVAIL;
         }
+    }
+
+    @Override
+    public String getDetailedStatus() {
+        if (client == null) {
+            return MqttUtils.NO_BROKER;
+        }
+        return super.getDetailedStatus();
     }
 }

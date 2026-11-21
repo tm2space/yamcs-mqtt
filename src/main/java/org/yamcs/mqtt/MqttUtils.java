@@ -1,5 +1,6 @@
 package org.yamcs.mqtt;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
@@ -34,6 +35,9 @@ import org.yamcs.Spec.OptionType;
  */
 public class MqttUtils {
     
+    /** Why a link with no broker in its config does not connect. */
+    static final String NO_BROKER = "no MQTT broker set";
+
     static {
         try {
             // Register SSL network module for mqtts:// and ssl:// schemes
@@ -44,11 +48,15 @@ public class MqttUtils {
     }
 
     /**
-     * create a new MQTT async client with the clientId and initial broker loaded from the config object
+     * create a new MQTT async client with the clientId and initial broker loaded from the config object; null when
+     * the config sets no broker
      */
     static MqttAsyncClient newClient(YConfiguration config) throws ConfigurationException {
         try {
-            List<String> brokers = config.getList("brokers");
+            List<String> brokers = brokers(config);
+            if (brokers.isEmpty()) {
+                return null;
+            }
             String clientId = config.getString("clientId", MqttClient.generateClientId());
 
             return new MqttAsyncClient(brokers.get(0), clientId);
@@ -57,11 +65,25 @@ public class MqttUtils {
         }
     }
 
+    /**
+     * The brokers of the config without the empty entries: an environment variable set to nothing gives one, and Paho
+     * refuses it.
+     */
+    static List<String> brokers(YConfiguration config) {
+        List<String> brokers = new ArrayList<>();
+        for (String broker : config.<String> getList("brokers")) {
+            if (broker != null && !broker.isBlank()) {
+                brokers.add(broker);
+            }
+        }
+        return brokers;
+    }
+
     static MqttConnectOptions getConnectionOptions(YConfiguration config) {
         MqttConnectOptions connOpts = new MqttConnectOptions();
 
         connOpts.setAutomaticReconnect(config.getBoolean("autoReconnect"));
-        List<String> brokers = config.getList("brokers");
+        List<String> brokers = brokers(config);
         connOpts.setServerURIs(brokers.toArray(new String[0]));
         if (config.containsKey("username")) {
             connOpts.setUserName(config.getString("username"));
@@ -125,7 +147,7 @@ public class MqttUtils {
     }
 
     static void addConnectionOptionsToSpec(Spec spec) {
-        spec.addOption("brokers", OptionType.LIST).withElementType(OptionType.STRING).withRequired(true);
+        spec.addOption("brokers", OptionType.LIST).withElementType(OptionType.STRING).withDefault(List.of());
         spec.addOption("username", OptionType.STRING).withRequired(false);
         spec.addOption("password", OptionType.STRING).withRequired(false);
         spec.addOption("clientId", OptionType.STRING).withRequired(false);
@@ -236,6 +258,10 @@ public class MqttUtils {
     static void connect(MqttConnectOptions connOpts, MqttAsyncClient client, Log log, EventProducer eventProducer,
             ConnectListener listener)
             throws MqttException {
+        if (client == null) {
+            noBroker(log, eventProducer);
+            return;
+        }
         log.info("Connecting to MQTT with clientId {} and options: {}", client.getClientId(), connOpts);
 
         client.connect(connOpts, null, new IMqttActionListener() {
@@ -280,6 +306,10 @@ public class MqttUtils {
             IMqttMessageListener messageListener, String topic, Log log, EventProducer eventProducer,
             SubscriptionFailureCallback subscriptionFailureCallback, ConnectListener listener)
             throws MqttException {
+        if (client == null) {
+            noBroker(log, eventProducer);
+            return;
+        }
         log.info("Connecting to MQTT with clientId {} and options: {}", client.getClientId(), connOpts);
 
         client.setCallback(new MqttCallbackExtended() {
@@ -377,13 +407,24 @@ public class MqttUtils {
         }
     }
 
+    /** A link enabled with no broker in its config: nothing to connect to. */
+    private static void noBroker(Log log, EventProducer eventProducer) {
+        String msg = "Not connecting to MQTT: " + NO_BROKER;
+        eventProducer.sendWarning(msg);
+        log.warn("{}", msg);
+    }
+
     public static void doDisable(MqttAsyncClient client) throws MqttException {
-        if (client.isConnected()) {
+        if (client != null && client.isConnected()) {
             client.disconnect();
         }
     }
 
     public static void doStop(MqttAsyncClient client, NotifyStoppedCallback stopCb, NotifyFailedCallback failCb) {
+        if (client == null) {
+            stopCb.notifyStopped();
+            return;
+        }
         try {
             if (client.isConnected()) {
                 client.disconnect(null,

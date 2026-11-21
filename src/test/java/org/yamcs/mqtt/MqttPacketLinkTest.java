@@ -360,6 +360,40 @@ public class MqttPacketLinkTest {
         mpt.stopAsync().awaitTerminated();
     }
 
+    /**
+     * A broker setting present but empty (an environment variable set to nothing) or left out: the link initialises
+     * and starts, disabled at startup or not. Enabled, it does not connect, says why and fails a command at once.
+     */
+    @Test
+    public void emptyBrokerDoesNotStopTheLink() throws Exception {
+        Map<String, Object> missing = new HashMap<>(getConfig(broker.port, false, "tm").getRoot());
+        missing.remove("brokers");
+        Map<String, Object> empty = new HashMap<>(missing);
+        empty.put("brokers", List.of(""));
+        for (Map<String, Object> m : List.of(empty, missing)) {
+            EventProducerFactory.getMockupQueue().clear();
+            var mpt = new MqttPacketLink();
+            mpt.init("test", "test", mpt.getSpec().validate(YConfiguration.wrap(m)));
+            mpt.disable();
+            mpt.startAsync().awaitRunning();
+            assertEquals(Status.DISABLED, mpt.getLinkStatus());
+
+            mpt.enable();
+            assertEquals(Status.FAILED, mpt.getLinkStatus(), "brokers " + m.get("brokers"));
+            assertEquals("no MQTT broker set", mpt.getDetailedStatus());
+            assertTrue(EventProducerFactory.getMockupQueue().stream()
+                    .anyMatch(e -> e.getMessage().equals("Not connecting to MQTT: no MQTT broker set")));
+
+            var cmdHist = mock(CommandHistoryPublisher.class);
+            mpt.setCommandHistoryPublisher(cmdHist);
+            assertTrue(mpt.sendCommand(mock(PreparedCommand.class)));
+            verify(cmdHist).commandFailed(any(), anyLong(), eq("no MQTT broker set"));
+
+            mpt.disable();
+            mpt.stopAsync().awaitTerminated();
+        }
+    }
+
     static void waitFor(String what, BooleanSupplier condition, long timeoutMillis) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMillis;
         while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {

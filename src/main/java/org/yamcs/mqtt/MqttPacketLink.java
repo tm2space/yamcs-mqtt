@@ -136,6 +136,10 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
     @Override
     public boolean sendCommand(PreparedCommand preparedCommand) {
         log.debug("Sending command {}", preparedCommand);
+        if (client == null) {
+            failedCommand(preparedCommand.getCommandId(), MqttUtils.NO_BROKER);
+            return true;
+        }
         byte[] data = postprocess(preparedCommand);
         if (data == null) {
             return false;
@@ -266,6 +270,9 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
 
     @Override
     public String getDetailedStatus() {
+        if (client == null) {
+            return MqttUtils.NO_BROKER;
+        }
         boolean connected = client != null && client.isConnected();
         String conn = connected ? "CONNECTED" : "DISCONNECTED";
         // getCurrentServerURI() throws NPE before the client has connected (no network modules yet),
@@ -363,6 +370,9 @@ public class MqttPacketLink extends AbstractTcTmParamLink implements IMqttMessag
 
     @Override
     protected Status connectionStatus() {
+        if (client == null) {
+            return Status.FAILED;
+        }
         if (client.isConnected() && subscriptionFailure == null) {
             return Status.OK;
         } else {

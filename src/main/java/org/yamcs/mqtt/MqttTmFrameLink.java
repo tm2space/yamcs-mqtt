@@ -149,10 +149,21 @@ public class MqttTmFrameLink extends AbstractTmFrameLink implements IMqttMessage
 
     @Override
     protected Status connectionStatus() {
+        if (client == null) {
+            return Status.FAILED;
+        }
         if (client.isConnected() && subscriptionFailure == null) {
             return Status.OK;
         } else {
             return Status.UNAVAIL;
         }
+    }
+
+    @Override
+    public String getDetailedStatus() {
+        if (client == null) {
+            return MqttUtils.NO_BROKER;
+        }
+        return super.getDetailedStatus();
     }
 }
